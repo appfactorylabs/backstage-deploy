@@ -1,0 +1,418 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: backstage
+  labels:
+    name: backstage
+---
+# ---------------------------------------------------------------------------
+# Deployment (Backstage API)
+# ---------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backstage-api
+  namespace: backstage
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: backstage-api
+  template:
+    metadata:
+      labels:
+        app: backstage-api
+    spec:
+      serviceAccountName: backstage-api-sa
+      containers:
+        - name: backstage-api
+          image: devstackhub/backstage-api:v1
+          ports:
+            - containerPort: 8080
+          env:
+            - name: GITLAB_ORG_PATH
+              value: blue-harvest/the-harvest/appfactory-platform
+---
+# ===============================
+# Backstage Backend API Service
+# ===============================
+apiVersion: v1
+kind: Service
+metadata:
+  name: backstage-api
+  namespace: backstage
+spec:
+  type: ClusterIP
+  selector:
+    app: backstage-api
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+# ---------------------------------------------------------------------------
+# ServiceAccount (Backstage API)
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: backstage-api-sa
+  namespace: backstage
+---
+# ---------------------------------------------------------------------------
+# Role: Read/Write Secrets in argocd namespace
+# ---------------------------------------------------------------------------
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: argocd-secrets-rw
+  namespace: argocd
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+---
+# ---------------------------------------------------------------------------
+# Role: Read/Write ArgoCD Applications (CRDs) in argocd namespace
+# ---------------------------------------------------------------------------
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: argocd-applications-rw
+  namespace: argocd
+rules:
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+# ---------------------------------------------------------------------------
+# RoleBinding: Bind Backstage SA → argocd secret RW role
+# ---------------------------------------------------------------------------
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: backstage-api-argocd-secrets
+  namespace: argocd
+subjects:
+  - kind: ServiceAccount
+    name: backstage-api-sa
+    namespace: backstage
+roleRef:
+  kind: Role
+  name: argocd-secrets-rw
+  apiGroup: rbac.authorization.k8s.io
+---
+# ---------------------------------------------------------------------------
+# RoleBinding: Bind Backstage SA → argocd applications RW role
+# ---------------------------------------------------------------------------
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: backstage-api-argocd-apps-rw
+  namespace: argocd
+subjects:
+  - kind: ServiceAccount
+    name: backstage-api-sa
+    namespace: backstage
+roleRef:
+  kind: Role
+  name: argocd-applications-rw
+  apiGroup: rbac.authorization.k8s.io
+---
+# ---------------------------------------------------------------------------
+# ClusterRole: Read and watch access to core & workload resources cluster-wide
+# (Used when resolving resource kinds, namespaces, statuses across all namespaces)
+# ---------------------------------------------------------------------------
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cluster-resources-reader
+rules:
+  - apiGroups:
+      - ""
+      - apps
+      - batch
+      - networking.k8s.io
+      - argoproj.io
+    resources:
+      - pods
+      - services
+      - deployments
+      - replicasets
+      - statefulsets
+      - daemonsets
+      - jobs
+      - cronjobs
+      - ingresses
+      - configmaps
+      - namespaces
+      - secrets
+      - applications
+      - endpoints
+      - events
+      - persistentvolumeclaims
+      - persistentvolumes
+    verbs: ["get", "list", "watch"]
+---
+# ---------------------------------------------------------------------------
+# ClusterRoleBinding: Bind Backstage SA → cluster resources reader
+# ---------------------------------------------------------------------------
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: backstage-api-cluster-read
+subjects:
+  - kind: ServiceAccount
+    name: backstage-api-sa
+    namespace: backstage
+roleRef:
+  kind: ClusterRole
+  name: cluster-resources-reader
+  apiGroup: rbac.authorization.k8s.io
+---
+
+
+# ===============================
+# BACKSTAGE Appfactory UI & Backend
+# ===============================
+---
+# ===============================
+# ConfigMap for Backstage Backend
+# ===============================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backstage-config
+  namespace: backstage
+data:
+  app-config.production.yaml: |
+    app:
+      baseUrl: http://localhost:3000
+      title: AppFactory Portal
+      listen:
+        host: 0.0.0.0
+        port: 3000
+      extensions:
+        - entity-content:kubernetes/kubernetes
+
+    organization:
+      name: AppFactory
+
+    backend:
+      baseUrl: http://localhost:7007
+      listen:
+        host: 0.0.0.0
+        port: 7007
+      csp:
+        connect-src: ["'self'", 'http:', 'https:']
+      cors:
+        origin: '*'
+        methods: [GET, HEAD, PATCH, POST, PUT, DELETE]
+        credentials: true
+      database:
+        client: better-sqlite3
+        connection: ':memory:'
+      auth:
+        dangerouslyDisableDefaultAuthPolicy: true
+
+    integrations:
+      github:
+        - host: github.com
+          token: ${GITHUB_TOKEN}
+
+    techdocs:
+      builder: 'local'
+      generator:
+        runIn: 'local'
+      publisher:
+        type: 'local'
+
+    auth:
+      providers:
+        guest: {}
+
+    scaffolder: {}
+
+    catalog:
+      rules:
+        - allow: [Component, API, Resource, System, Domain, Location, User, Group]
+      providers:
+        company:
+          baseUrl: http://backstage-api:8080
+
+    permission:
+      enabled: true
+
+    proxy:
+      endpoints:
+        '/spring-backend':
+          target: 'http://backstage-api:8080'
+          changeOrigin: true
+
+    kubernetes:
+      serviceLocatorMethod:
+        type: 'multiTenant'
+      clusterLocatorMethods:
+        - type: 'config'
+          clusters:
+            - url: https://kubernetes.default.svc
+              name: in-cluster
+              title: 'Current Cluster'
+              authProvider: 'serviceAccount'
+              skipTLSVerify: false
+---
+# ===============================
+# Backstage Backend Deployment
+# ===============================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backstage
+  namespace: backstage
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: backstage
+  template:
+    metadata:
+      labels:
+        app: backstage
+    spec:
+      serviceAccountName: backstage-sa
+      containers:
+        - name: backstage
+          image: devstackhub/backstage:v1
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 7007
+          env:
+            - name: NODE_ENV
+              value: "production"
+  #          - name: DEBUG
+  #            value: "*"
+          volumeMounts:
+            - name: config-volume
+              mountPath: /app/app-config.production.yaml
+              subPath: app-config.production.yaml
+          readinessProbe:
+            httpGet:
+              path: /healthcheck
+              port: 7007
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthcheck
+              port: 7007
+            initialDelaySeconds: 60
+            periodSeconds: 20
+      volumes:
+        - name: config-volume
+          configMap:
+            name: backstage-config
+            items:
+              - key: app-config.production.yaml
+                path: app-config.production.yaml
+
+---
+# ===============================
+# Backstage Backend Service
+# ===============================
+apiVersion: v1
+kind: Service
+metadata:
+  name: backstage
+  namespace: backstage
+spec:
+  type: ClusterIP
+  selector:
+    app: backstage
+  ports:
+    - name: http
+      port: 7007
+      targetPort: 7007
+---
+---
+# ===============================
+# ServiceAccount
+# ===============================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: backstage-sa
+  namespace: backstage
+
+---
+# ===============================
+# RBAC ClusterRole (for all namespaces)
+# ===============================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: backstage-clusterrole
+rules:
+  # Core API resources
+  - apiGroups: [""]
+    resources:
+      - pods
+      - pods/log
+      - services
+      - endpoints
+      - namespaces
+      - configmaps
+      - limitranges
+      - resourcequotas
+    verbs: ["get", "list", "watch"]
+  
+  # Apps API resources
+  - apiGroups: ["apps"]
+    resources:
+      - deployments
+      - replicasets
+      - statefulsets
+      - daemonsets
+    verbs: ["get", "list", "watch"]
+  
+  # Autoscaling resources
+  - apiGroups: ["autoscaling"]
+    resources:
+      - horizontalpodautoscalers
+    verbs: ["get", "list", "watch"]
+  
+  # Batch resources
+  - apiGroups: ["batch"]
+    resources:
+      - jobs
+      - cronjobs
+    verbs: ["get", "list", "watch"]
+  
+  # Networking resources
+  - apiGroups: ["networking.k8s.io"]
+    resources:
+      - ingresses
+    verbs: ["get", "list", "watch"]
+  
+  # Metrics resources
+  - apiGroups: ["metrics.k8s.io"]
+    resources:
+      - pods
+      - nodes
+    verbs: ["get", "list"]
+
+---
+# ===============================
+# RBAC ClusterRoleBinding
+# ===============================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: backstage-clusterrolebinding
+subjects:
+  - kind: ServiceAccount
+    name: backstage-sa
+    namespace: backstage
+roleRef:
+  kind: ClusterRole
+  name: backstage-clusterrole
+  apiGroup: rbac.authorization.k8s.io
