@@ -26,7 +26,7 @@ spec:
       serviceAccountName: backstage-api-sa
       containers:
         - name: backstage-api
-          image: ghcr.io/appfactorylabs/backstage-api:20260109.144459.0
+          image: ghcr.io/appfactorylabs/backstage-api:latest
           ports:
             - containerPort: 8080
           env:
@@ -282,7 +282,7 @@ spec:
       serviceAccountName: backstage-sa
       containers:
         - name: backstage
-          image: ghcr.io/appfactorylabs/backstage:20857569530
+          image: ghcr.io/appfactorylabs/backstage:latest
           imagePullPolicy: Always
           ports:
             - containerPort: 7007
